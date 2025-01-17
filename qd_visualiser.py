@@ -227,9 +227,9 @@ def create_fundamental_diagram(df, activation_thresholds, deactivation_threshold
     return fig
 
 def main():
-    st.set_page_config(page_title="Traffic Fundamental Diagram", layout="wide")
+    st.set_page_config(page_title="QD Visualiser", layout="wide")
     
-    st.title("Interactive Traffic Fundamental Diagram")
+    st.title("Interactive Queue Detection Algorithm Visualiser")
     
     # Sidebar for controls
     st.sidebar.header("Data Configuration")
