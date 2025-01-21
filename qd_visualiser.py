@@ -101,20 +101,6 @@ def create_fundamental_diagram(df, activation_thresholds, deactivation_threshold
             showlegend=True
         ))
 
-        # # Vertical region for occupancy
-        # x_occupancy = [activation_thresholds['occupancy'], activation_thresholds['occupancy']]
-        # y_occupancy = [0, 100]
-        # x_occupancy2 = [50, 50]
-        # y_occupancy2 = [0, 100]
-
-        # fig.add_trace(go.Scatter(
-        #     x=x_occupancy + x_occupancy2[::-1],
-        #     y=y_occupancy + y_occupancy2[::-1],
-        #     fill='toself',
-        #     fillcolor='rgba(255, 0, 0, 0.5)',
-        #     line=dict(width=0),
-        #     showlegend=False
-        # ))
 
     # Add deactivation regions based on logic
     if deactivation_logic == 'AND':
@@ -187,15 +173,17 @@ def create_fundamental_diagram(df, activation_thresholds, deactivation_threshold
                 if activation_streak == 1:
                     color = 'yellow'
                 elif activation_streak >= consecutive_intervals:
-                    color = 'red'
+                    color = 'black'
                 else:
                     color = 'yellow'
             elif df['deactivation'].iloc[idx]:
                 activation_streak = 0
                 color = 'green'
             else:
-                activation_streak = 0
-                color = 'green'
+                if activation_streak > 0:
+                    color = 'black'
+                else:
+                    color = 'green'
 
             size = 10
             opacity = 0.9 if idx == current_index else 0.6
@@ -227,7 +215,7 @@ def create_fundamental_diagram(df, activation_thresholds, deactivation_threshold
     return fig
 
 def main():
-    st.set_page_config(page_title="QD Visualiser", layout="wide")
+    st.set_page_config(page_title="Queue Detection Algorithm - Visualiser", layout="wide")
     
     st.title("Interactive Queue Detection Algorithm Visualiser")
     
@@ -263,6 +251,16 @@ def main():
             available_columns,
             index=next((i for i, col in enumerate(available_columns) if 'time' in col.lower() or 'date' in col.lower()), 0)
         )
+        
+        if datetime_col:
+            # Ensure the column is in datetime format
+            st.session_state.raw_df[datetime_col] = pd.to_datetime(st.session_state.raw_df[datetime_col], errors='coerce')
+            
+            # Drop rows where the DateTime conversion failed
+            st.session_state.raw_df = st.session_state.raw_df.dropna(subset=[datetime_col])
+
+            # Sort by the DateTime column
+            st.session_state.raw_df = st.session_state.raw_df.sort_values(by=datetime_col).reset_index(drop=True)
         
         speed_col = st.sidebar.selectbox(
             "Select Speed column",
@@ -340,9 +338,19 @@ def main():
         if end_datetime < start_datetime:
             st.sidebar.warning("Warning: End datetime is before start datetime!")
         
+        # Ask user if smoothing is required
+        st.sidebar.subheader("Data Smoothing")
+        apply_smoothing = st.sidebar.checkbox("Apply Exponential Smoothing?", value=False)
+        
+        if apply_smoothing:
+            alpha_value = st.sidebar.slider(
+                "Smoothing Alpha Value", min_value=0.1, max_value=1.0, value=0.2, step=0.1,
+                help="Alpha controls the degree of smoothing. Lower values give more smoothing."
+            )
+        
         # Animation speed control
         st.sidebar.subheader("Animation Speed")
-        st.session_state.animation_speed = st.sidebar.slider("Animation Speed (seconds)", min_value=0.1, max_value=5.0, value=0.5)
+        st.session_state.animation_speed = st.sidebar.slider("Animation Speed (seconds)", min_value=0.01, max_value=1.0, value=0.3)
         
         # Threshold controls
         st.sidebar.header("Threshold Controls")
@@ -364,7 +372,6 @@ def main():
         activation_occupancy = st.sidebar.number_input("Activation Occupancy (%)", 0.0, 50.0, 25.0)
         deactivation_speed = st.sidebar.number_input("Deactivation Speed (km/h)", 0.0, 80.0, 52.0)
         deactivation_occupancy = st.sidebar.number_input("Deactivation Occupancy (%)", 0.0, 50.0, 20.0)
-    
         
         # Add Consecutive Intervals parameter
         consecutive_intervals = st.sidebar.number_input("Consecutive Intervals", value=4, min_value=1)
@@ -388,6 +395,22 @@ def main():
             column_config
         )
         
+        # Set smoothing alpha value
+        if apply_smoothing:
+
+            # Apply smoothing to selected columns
+            if st.session_state.processed_df is not None:
+                # Specify which columns to smooth
+                columns_to_smooth = ['speed', 'occupancy']
+                
+                for col in columns_to_smooth:
+                    if col in st.session_state.processed_df.columns:
+                        st.session_state.processed_df[col] = (
+                            st.session_state.processed_df[col].ewm(alpha=alpha_value).mean()
+                        )
+                
+                st.sidebar.success(f"Exponential smoothing applied with alpha = {alpha_value}")
+        
         # Main content area
         col1, col2, col3 = st.columns([1, 2, 1])
         
@@ -396,8 +419,29 @@ def main():
                 st.session_state.play = not st.session_state.play
         
         with col2:
-            if st.session_state.processed_df is not None:
-                st.markdown(f"Showing point {st.session_state.current_index + 1} of {len(st.session_state.processed_df)}")
+            # Show point progress
+            st.markdown(f"Showing point {st.session_state.current_index + 1} of {len(st.session_state.processed_df)}")
+            
+            # Show current point information
+            if st.session_state.processed_df is not None and not st.session_state.processed_df.empty:
+                if 0 <= st.session_state.current_index < len(st.session_state.processed_df):
+                    current_point = st.session_state.processed_df.iloc[st.session_state.current_index]
+                    current_datetime = current_point['datetime'].strftime('%Y-%m-%d %H:%M:%S')
+                    current_speed = current_point['speed']
+                    current_occupancy = current_point['occupancy']
+            
+                    st.markdown("""
+                    **Current Point Details:**
+                    """)
+                    st.markdown(f"""
+                    - DateTime: {current_datetime}
+                    - Speed: {current_speed:.2f} km/h
+                    - Occupancy: {current_occupancy:.2f}%
+                    """)
+                else:
+                    st.warning("Current index is out of bounds.")
+            else:
+                st.warning("Processed data is unavailable.")
         
         with col3:
             if st.button("Reset"):
@@ -412,7 +456,8 @@ def main():
                 {'speed': deactivation_speed, 'occupancy': deactivation_occupancy},
                 consecutive_intervals,
                 activation_logic,
-                deactivation_logic
+                deactivation_logic,
+                current_index=st.session_state.current_index
             )
             st.plotly_chart(fig, use_container_width=True)
             
