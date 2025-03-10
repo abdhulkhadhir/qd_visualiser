@@ -1,475 +1,199 @@
 # -*- coding: utf-8 -*-
 """
-Created on Fri Nov 22 11:24:33 2024
+Created on Mon Mar 10 12:23:30 2025
 
 @author: seyedhyd
 """
 
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
+import json
 from datetime import datetime
-import numpy as np
-import time
+import base64
+from github import Github
+import os
 
-def load_and_process_data(uploaded_file):
-    """Load the CSV file without processing."""
-    try:
-        df = pd.read_csv(uploaded_file)
-        return df
-    except Exception as e:
-        st.error(f"Error loading file: {str(e)}")
-        return None
+# Initialize session state
+if 'current_section' not in st.session_state:
+    st.session_state.current_section = 0
+if 'responses' not in st.session_state:
+    st.session_state.responses = {}
+if 'submitted' not in st.session_state:
+    st.session_state.submitted = False
 
-def process_selected_columns(df, column_config):
-    """Process the dataframe with selected columns and filters."""
-    try:
-        # Rename columns according to selection
-        df = df.rename(columns={
-            column_config['datetime']: 'datetime',
-            column_config['speed']: 'speed',
-            column_config['occupancy']: 'occupancy'
-        })
-        
-        # Convert datetime column
-        df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce')
+# Configure GitHub integration
+GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
+REPO_NAME = "abdhulkhadhir/qd_visualiser"
+CSV_PATH = "responses.csv"
 
-        # Drop rows with invalid datetime
-        df = df.dropna(subset=['datetime'])
+# Section configurations
+SECTIONS = [
+    "Participant Context",
+    "System Design",
+    "Operational Challenges",
+    "Impact Assessment",
+    "Lessons Learned",
+    "Policy & Governance",
+    "Future Directions",
+    "Demographics"
+]
 
-        # Ensure datetime consistency
-        if df['datetime'].dt.tz is not None:  # If timezone-aware
-            start_datetime = pd.Timestamp(column_config['start_datetime']).tz_localize(df['datetime'].dt.tz)
-            end_datetime = pd.Timestamp(column_config['end_datetime']).tz_localize(df['datetime'].dt.tz)
-        else:  # If timezone-naive
-            start_datetime = pd.Timestamp(column_config['start_datetime'])
-            end_datetime = pd.Timestamp(column_config['end_datetime'])
+# Progress bar
+progress = st.session_state.current_section / (len(SECTIONS)-1)
 
-        # Add flow column if selected
-        if column_config.get('flow'):
-            df = df.rename(columns={column_config['flow']: 'flow'})
-        
-        # Filter by detector if selected
-        if column_config.get('detector') and column_config.get('selected_detector'):
-            df = df[df[column_config['detector']] == column_config['selected_detector']]
-        
-        # Filter by date and time range
-        df = df[(df['datetime'] >= start_datetime) & (df['datetime'] <= end_datetime)]
+# Tooltips
+TOOLTIPS = {
+    "control_logic": "Control logic refers to the algorithmic approach used to determine speed limits",
+    "rwis": "Road Weather Information System (RWIS) uses roadside sensors to monitor conditions",
+    "mucd": "Manual on Uniform Traffic Control Devices (MUTCD) - US regulatory framework"
+}
+
+def show_section(section_num):
+    st.markdown(f"## {SECTIONS[section_num]}")
+    
+    if section_num == 0:  # Participant Context
+        with st.expander("**About This Survey**"):
+            st.markdown("""
+            This survey collects global insights on weather-responsive VSL systems. 
+            All responses are anonymized and will be used for academic research.
+            """)
             
-        return df
-    except Exception as e:
-        st.error(f"Error processing data: {str(e)}")
-        return None
-
-def create_fundamental_diagram(df, activation_thresholds, deactivation_thresholds, consecutive_intervals, activation_logic='AND', deactivation_logic='OR', current_index=None):
-    """Create the fundamental diagram with color-coded points and configurable logic operators."""
-    fig = go.Figure()
-    max_occupancy = 100
-    max_speed = 100
-
-    # Add activation regions based on logic
-    if activation_logic == 'AND':
-        # Single region for AND condition
-        x_activation = [activation_thresholds['occupancy'], max_occupancy]
-        y_activation = [0, 0]
-        y_activation2 = [activation_thresholds['speed'], activation_thresholds['speed']]
-
-        fig.add_trace(go.Scatter(
-            x=x_activation + x_activation[::-1],
-            y=y_activation + y_activation2[::-1],
-            fill='toself',
-            fillcolor='rgba(255, 0, 0, 1)',
-            line=dict(width=0),
-            name='Activation Region (AND)',
-            showlegend=True
-        ))
-    else:  # OR condition
-        # Horizontal region for speed
-        x_act_or = [0, max_occupancy, max_occupancy, activation_thresholds['occupancy'], activation_thresholds['occupancy'], 0]
-        y_act_or = [0, 0, max_speed, max_speed, activation_thresholds['speed'], activation_thresholds['speed']]
-        # x_speed = [0, max_occupancy]
-        # y_speed = [0, 0]
-        # y_speed2 = [activation_thresholds['speed'], activation_thresholds['speed']]
-
-        fig.add_trace(go.Scatter(
-            x=x_act_or,
-            y=y_act_or,
-            fill='toself',
-            fillcolor='rgba(255, 0, 0, 1.0)',
-            line=dict(width=0),
-            name='Activation Region (OR)',
-            showlegend=True
-        ))
-
-
-    # Add deactivation regions based on logic
-    if deactivation_logic == 'AND':
-        # Single region for AND condition (complement of OR region)
-        x_deact_and = [0, deactivation_thresholds['occupancy'],  deactivation_thresholds['occupancy'], 0]
-        y_deact_and = [deactivation_thresholds['speed'], deactivation_thresholds['speed'], 
-                   max_speed, max_speed]
-
-        fig.add_trace(go.Scatter(
-            x=x_deact_and,
-            y=y_deact_and,
-            fill='toself',
-            fillcolor='rgba(0, 255, 0, 1.0)',
-            line=dict(width=0),
-            name='Deactivation Region (AND)',
-            showlegend=True
-        ))
-    else:  # OR condition
-        # Horizontal region
-        x_deact_h = [0, max_occupancy]
-        y_deact_h = [deactivation_thresholds['speed'], deactivation_thresholds['speed']]
-        y_deact_h2 = [max_speed, max_speed]
-
-        fig.add_trace(go.Scatter(
-            x=x_deact_h + x_deact_h[::-1],
-            y=y_deact_h + y_deact_h2[::-1],
-            fill='toself',
-            fillcolor='rgba(0, 255, 0, 1.0)',
-            line=dict(width=0),
-            name='Deactivation Region (OR)',
-            showlegend=True
-        ))
-
-        # Vertical region
-        x_deact_v = [0, deactivation_thresholds['occupancy']]
-        y_deact_v = [0, 0]
-        y_deact_v2 = [max_speed, max_speed]
-
-        fig.add_trace(go.Scatter(
-            x=x_deact_v + x_deact_v[::-1],
-            y=y_deact_v + y_deact_v2[::-1],
-            fill='toself',
-            fillcolor='rgba(0, 255, 0, 1.0)',
-            line=dict(width=0),
-            showlegend=False
-        ))
-
-    # Add data points
-    if len(df) > 0:
-        # Update activation/deactivation conditions based on selected logic
-        if activation_logic == 'AND':
-            df['activation'] = (df['speed'] <= activation_thresholds['speed']) & \
-                             (df['occupancy'] >= activation_thresholds['occupancy'])
-        else:  # OR
-            df['activation'] = (df['speed'] <= activation_thresholds['speed']) | \
-                             (df['occupancy'] >= activation_thresholds['occupancy'])
-
-        if deactivation_logic == 'AND':
-            df['deactivation'] = (df['speed'] >= deactivation_thresholds['speed']) & \
-                                (df['occupancy'] <= deactivation_thresholds['occupancy'])
-        else:  # OR
-            df['deactivation'] = (df['speed'] >= deactivation_thresholds['speed']) | \
-                                (df['occupancy'] <= deactivation_thresholds['occupancy'])
-
-        activation_streak = 0
-
-        for idx in range(len(df)):
-            if df['activation'].iloc[idx]:
-                activation_streak += 1
-                if activation_streak == 1:
-                    color = 'yellow'
-                elif activation_streak >= consecutive_intervals:
-                    color = 'black'
-                else:
-                    color = 'yellow'
-            elif df['deactivation'].iloc[idx]:
-                activation_streak = 0
-                color = 'green'
-            else:
-                if activation_streak > 0:
-                    color = 'black'
-                else:
-                    color = 'green'
-
-            size = 10
-            opacity = 0.9 if idx == current_index else 0.6
-
-            fig.add_trace(go.Scatter(
-                x=[df['occupancy'].iloc[idx]],
-                y=[df['speed'].iloc[idx]],
-                mode='markers',
-                marker=dict(
-                    size=size,
-                    color=color,
-                    opacity=opacity
-                ),
-                name=f"Point {idx + 1}" if idx == current_index else None,
-                showlegend=False
-            ))
-
-    # Update layout
-    fig.update_layout(
-        title='Speed-Occupancy Fundamental Diagram',
-        xaxis_title='Occupancy (%)',
-        yaxis_title='Speed (km/h)',
-        xaxis_range=[0, 75],
-        yaxis_range=[0, 100],
-        height=600,
-        showlegend=True
-    )
-
-    return fig
-
-def main():
-    st.set_page_config(page_title="Queue Detection Algorithm - Visualiser", layout="wide")
-    
-    st.title("Interactive Queue Detection Algorithm Visualiser")
-    
-    # Sidebar for controls
-    st.sidebar.header("Data Configuration")
-    
-    # File uploader
-    uploaded_file = st.sidebar.file_uploader("Upload CSV file", type="csv")
-    
-    # Initialize session state
-    if 'raw_df' not in st.session_state:
-        st.session_state.raw_df = None
-    if 'processed_df' not in st.session_state:
-        st.session_state.processed_df = None
-    if 'play' not in st.session_state:
-        st.session_state.play = False
-    if 'current_index' not in st.session_state:
-        st.session_state.current_index = 0
-    if 'animation_speed' not in st.session_state:
-        st.session_state.animation_speed = 0.5  # Default animation speed in seconds
-
-    # Process uploaded file
-    if uploaded_file is not None:
-        st.session_state.raw_df = load_and_process_data(uploaded_file)
-    
-    # Column selection and data processing
-    if st.session_state.raw_df is not None:
-        available_columns = st.session_state.raw_df.columns.tolist()
-        
-        st.sidebar.subheader("Column Selection")
-        datetime_col = st.sidebar.selectbox(
-            "Select DateTime column",
-            available_columns,
-            index=next((i for i, col in enumerate(available_columns) if 'time' in col.lower() or 'date' in col.lower()), 0)
-        )
-        
-        if datetime_col:
-            # Ensure the column is in datetime format
-            st.session_state.raw_df[datetime_col] = pd.to_datetime(st.session_state.raw_df[datetime_col], errors='coerce')
-            
-            # Drop rows where the DateTime conversion failed
-            st.session_state.raw_df = st.session_state.raw_df.dropna(subset=[datetime_col])
-
-            # Sort by the DateTime column
-            st.session_state.raw_df = st.session_state.raw_df.sort_values(by=datetime_col).reset_index(drop=True)
-        
-        speed_col = st.sidebar.selectbox(
-            "Select Speed column",
-            available_columns,
-            index=next((i for i, col in enumerate(available_columns) if 'speed' in col.lower()), 0)
-        )
-        
-        occupancy_col = st.sidebar.selectbox(
-            "Select Occupancy column",
-            available_columns,
-            index=next((i for i, col in enumerate(available_columns) if 'occup' in col.lower()), 0)
-        )
-        
-        flow_col = st.sidebar.selectbox(
-            "Select Flow column (optional)",
-            ['None'] + available_columns,
-            index=next((i + 1 for i, col in enumerate(available_columns) if 'flow' in col.lower()), 0)
-        )
-        
-        # Detector selection
-        detector_col = st.sidebar.selectbox(
-            "Select Detector column (optional)",
-            ['None'] + available_columns,
-            index=next((i + 1 for i, col in enumerate(available_columns) if 'detector' in col.lower() or 'id' in col.lower()), 0)
-        )
-        
-        selected_detector = None
-        if detector_col != 'None':
-            selected_detector = st.sidebar.selectbox(
-                "Select Detector",
-                sorted(st.session_state.raw_df[detector_col].unique())
+        cols = st.columns(2)
+        with cols[0]:
+            st.session_state.responses['region'] = st.radio(
+                "**1. Geographical region of operation**",
+                options=['North America', 'Europe', 'Australia/NZ', 'Asia', 
+                        'Middle East', 'Africa', 'South America']
             )
-        
-        # Date and Time range selection
-        st.sidebar.subheader("Date and Time Range Filter")
-        
-        # Convert to datetime for min/max values
-        min_datetime = pd.to_datetime(st.session_state.raw_df[datetime_col].min())
-        max_datetime = pd.to_datetime(st.session_state.raw_df[datetime_col].max())
-        
-        # Date and Time selection in columns
-        col1, col2 = st.sidebar.columns(2)
-        
-        with col1:
-            start_date = st.date_input(
-                "Start Date",
-                value=min_datetime.date(),
-                min_value=min_datetime.date(),
-                max_value=max_datetime.date()
+        with cols[1]:
+            st.session_state.responses['experience'] = st.radio(
+                "**2. Years of experience with WRVSL systems**",
+                options=['<1 year', '1–3 years', '4–7 years', '8+ years']
             )
             
-            start_time = st.time_input(
-                "Start Time",
-                value=min_datetime.time()
-            )
-        
-        with col2:
-            end_date = st.date_input(
-                "End Date",
-                value=max_datetime.date(),
-                min_value=min_datetime.date(),
-                max_value=max_datetime.date()
+        st.session_state.responses['org_type'] = st.selectbox(
+            "**3. Organization type**",
+            options=['Government agency', 'Private consultancy', 
+                    'Academic', 'NGO', 'Other']
+        )
+
+    elif section_num == 1:  # System Design
+        cols = st.columns(2)
+        with cols[0]:
+            st.markdown("### System Configuration")
+            st.session_state.responses['vsl_types'] = st.multiselect(
+                "**4. Types of VSL systems managed**",
+                options=['Congestion-responsive', 'Weather-responsive', 
+                        'Event-specific', 'Other']
             )
             
-            end_time = st.time_input(
-                "End Time",
-                value=max_datetime.time()
+            weather_params = st.multiselect(
+                "**5. Primary weather parameters triggering adjustments**",
+                options=['Rainfall intensity', 'Snow accumulation', 'Pavement friction',
+                        'Visibility', 'Wind speed', 'Humidity', 'Other']
             )
-      
-        # Combine date and time into datetime objects
-        start_datetime = pd.Timestamp.combine(start_date, start_time)
-        end_datetime = pd.Timestamp.combine(end_date, end_time)
-        
-        # Add warning if end datetime is before start datetime
-        if end_datetime < start_datetime:
-            st.sidebar.warning("Warning: End datetime is before start datetime!")
-        
-        # Ask user if smoothing is required
-        st.sidebar.subheader("Data Smoothing")
-        apply_smoothing = st.sidebar.checkbox("Apply Exponential Smoothing?", value=False)
-        
-        if apply_smoothing:
-            alpha_value = st.sidebar.slider(
-                "Smoothing Alpha Value", min_value=0.1, max_value=1.0, value=0.2, step=0.1,
-                help="Alpha controls the degree of smoothing. Lower values give more smoothing."
+            st.session_state.responses['weather_params'] = ", ".join(weather_params)
+            
+        with cols[1]:
+            st.markdown("### Data & Control Logic")
+            data_sources = ["RWIS/roadside sensors", "Connected vehicle telematics",
+                           "Radar/satellite forecasts", "Thermal cameras",
+                           "Manual operator reports"]
+            ranked = st.multiselect(
+                "**6. Rank data sources (1=Most Critical)**",
+                options=data_sources,
+                default=data_sources,
+                format_func=lambda x: f"{data_sources.index(x)+1}. {x}"
             )
-        
-        # Animation speed control
-        st.sidebar.subheader("Animation Speed")
-        st.session_state.animation_speed = st.sidebar.slider("Animation Speed (seconds)", min_value=0.01, max_value=1.0, value=0.3)
-        
-        # Threshold controls
-        st.sidebar.header("Threshold Controls")
-    
-        # Add logic operator selection
-        activation_logic = st.sidebar.selectbox(
-            "Activation Logic",
-            options=['AND', 'OR'],
-            help="AND: Both conditions must be met; OR: Either condition must be met"
-        )
-        
-        deactivation_logic = st.sidebar.selectbox(
-            "Deactivation Logic",
-            options=['OR', 'AND'],
-            help="AND: Both conditions must be met; OR: Either condition must be met"
-        )
-        
-        activation_speed = st.sidebar.number_input("Activation Speed (km/h)", 0.0, 80.0, 45.0)
-        activation_occupancy = st.sidebar.number_input("Activation Occupancy (%)", 0.0, 50.0, 25.0)
-        deactivation_speed = st.sidebar.number_input("Deactivation Speed (km/h)", 0.0, 80.0, 52.0)
-        deactivation_occupancy = st.sidebar.number_input("Deactivation Occupancy (%)", 0.0, 50.0, 20.0)
-        
-        # Add Consecutive Intervals parameter
-        consecutive_intervals = st.sidebar.number_input("Consecutive Intervals", value=4, min_value=1)
-        
-        # Process data with selected columns and filters
-        column_config = {
-            'datetime': datetime_col,
-            'speed': speed_col,
-            'occupancy': occupancy_col,
-            'start_datetime': start_datetime,
-            'end_datetime': end_datetime
-        }
-        if flow_col != 'None':
-            column_config['flow'] = flow_col
-        if detector_col != 'None':
-            column_config['detector'] = detector_col
-            column_config['selected_detector'] = selected_detector
-        
-        st.session_state.processed_df = process_selected_columns(
-            st.session_state.raw_df,
-            column_config
-        )
-        
-        # Set smoothing alpha value
-        if apply_smoothing:
-
-            # Apply smoothing to selected columns
-            if st.session_state.processed_df is not None:
-                # Specify which columns to smooth
-                columns_to_smooth = ['speed', 'occupancy']
+            st.session_state.responses['data_sources'] = ", ".join(ranked)
+            
+            control_logic = st.radio(
+                "**7. Control logic architecture**",
+                options=['Rule-based thresholds (fixed)', 
+                        'Dynamic thresholds (real-time adjustments)',
+                        'Machine learning based'],
+                help=TOOLTIPS['control_logic']
+            )
+            st.session_state.responses['control_logic'] = control_logic
+            
+            if "Rule-based" in control_logic:
+                threshold_method = st.radio(
+                    "**How were thresholds determined?**",
+                    options=['Historical crash data', 'Regulatory guidelines',
+                            'Trial-and-error', 'Other']
+                )
+                st.session_state.responses['threshold_method'] = threshold_method
                 
-                for col in columns_to_smooth:
-                    if col in st.session_state.processed_df.columns:
-                        st.session_state.processed_df[col] = (
-                            st.session_state.processed_df[col].ewm(alpha=alpha_value).mean()
-                        )
-                
-                st.sidebar.success(f"Exponential smoothing applied with alpha = {alpha_value}")
-        
-        # Main content area
-        col1, col2, col3 = st.columns([1, 2, 1])
-        
-        with col1:
-            if st.button("Play/Pause"):
-                st.session_state.play = not st.session_state.play
-        
-        with col2:
-            # Show point progress
-            st.markdown(f"Showing point {st.session_state.current_index + 1} of {len(st.session_state.processed_df)}")
+    # Add other section implementations following similar patterns...
+
+def save_to_github(df):
+    """Save responses to GitHub repo"""
+    g = Github(GITHUB_TOKEN)
+    repo = g.get_repo(REPO_NAME)
+    contents = repo.get_contents(CSV_PATH)
+    
+    # Append new response
+    existing_data = pd.read_csv(base64.b64decode(contents.content))
+    updated_df = pd.concat([existing_data, df])
+    
+    repo.update_file(contents.path, "Update VSL responses", 
+                    updated_df.to_csv(index=False), contents.sha)
+    return True
+
+# Main app layout
+st.set_page_config(page_title="Global VSL Survey", layout="wide")
+st.markdown("""
+<style>
+    [data-testid=stSidebar] {
+        display: none !important;
+    }
+    .stProgress > div > div > div {
+        background-color: #1E90FF;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🌦️ Global Weather-Responsive VSL Survey")
+st.markdown(f"**Progress:** {int(progress*100)}% complete")
+st.progress(progress)
+
+# Show current section
+show_section(st.session_state.current_section)
+
+# Navigation controls
+col1, col2, col3 = st.columns([2,1,2])
+with col2:
+    if st.session_state.current_section > 0:
+        if st.button("← Previous Section"):
+            st.session_state.current_section -= 1
+            st.experimental_rerun()
             
-            # Show current point information
-            if st.session_state.processed_df is not None and not st.session_state.processed_df.empty:
-                if 0 <= st.session_state.current_index < len(st.session_state.processed_df):
-                    current_point = st.session_state.processed_df.iloc[st.session_state.current_index]
-                    current_datetime = current_point['datetime'].strftime('%Y-%m-%d %H:%M:%S')
-                    current_speed = current_point['speed']
-                    current_occupancy = current_point['occupancy']
+    if st.session_state.current_section < len(SECTIONS)-1:
+        if st.button("Next Section →"):
+            # Add validation here
+            st.session_state.current_section += 1
+            st.experimental_rerun()
+    else:
+        if st.button("Submit Responses"):
+            df = pd.DataFrame([st.session_state.responses])
             
-                    st.markdown("""
-                    **Current Point Details:**
-                    """)
-                    st.markdown(f"""
-                    - DateTime: {current_datetime}
-                    - Speed: {current_speed:.2f} km/h
-                    - Occupancy: {current_occupancy:.2f}%
-                    """)
+            # Save to GitHub
+            if GITHUB_TOKEN:
+                if save_to_github(df):
+                    st.success("Responses saved successfully!")
                 else:
-                    st.warning("Current index is out of bounds.")
-            else:
-                st.warning("Processed data is unavailable.")
-        
-        with col3:
-            if st.button("Reset"):
-                st.session_state.current_index = 0
-                st.session_state.play = False
-        
-        # Create and display the plot
-        if st.session_state.processed_df is not None:
-            fig = create_fundamental_diagram(
-                st.session_state.processed_df.iloc[:st.session_state.current_index + 1],
-                {'speed': activation_speed, 'occupancy': activation_occupancy},
-                {'speed': deactivation_speed, 'occupancy': deactivation_occupancy},
-                consecutive_intervals,
-                activation_logic,
-                deactivation_logic,
-                current_index=st.session_state.current_index
+                    st.error("Error saving responses")
+            
+            # Local download fallback
+            csv = df.to_csv(index=False)
+            st.download_button(
+                label="Download Responses",
+                data=csv,
+                file_name='vsl_responses.csv',
+                mime='text/csv'
             )
-            st.plotly_chart(fig, use_container_width=True)
             
-            # Animation logic
-            if st.session_state.play:
-                if st.session_state.current_index < len(st.session_state.processed_df) - 1:
-                    time.sleep(st.session_state.animation_speed)
-                    st.session_state.current_index += 1
-                else:
-                    st.session_state.play = False
-                st.rerun()
-
-
-if __name__ == "__main__":
-    main()
+            st.session_state.submitted = True
+            st.session_state.responses = {}
+            st.session_state.current_section = 0
+            st.experimental_rerun()
